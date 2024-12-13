@@ -1,0 +1,198 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  SsmPublicHostedZoneIdKey:
+    Type: AWS::SSM::Parameter::Value<AWS::Route53::HostedZone::Id>
+    Default: /cloudacademy/cfn/route53/hostedzone/public/id
+  CloudFrontCertificateArn:
+    Type: String
+  Username:
+    Type: String
+  Runtime:
+    Type: String
+  MemorySize:
+    Type: Number
+
+Resources:
+  TodosTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      TableName: !Sub ${Username}-todo
+      PrimaryKey:
+        Name: id
+        Type: String
+      Tags:
+        Project: TodosAPI
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  TodosLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Username}TodosAPIHandler
+      Handler: index.lambda_handler
+      Runtime: !Ref Runtime
+      MemorySize: !Ref MemorySize
+      Timeout: 15
+      InlineCode: |
+        import json
+        import boto3
+        import uuid
+        import os
+        from boto3.dynamodb.conditions import Key
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table(os.environ['TABLE_NAME'])
+        def lambda_handler(event, context):
+          http_method = event['requestContext']['http']['method']
+          body = json.loads(event.get('body', '{}'))
+          id = event.get('queryStringParameters', {}).get('id') if event.get('queryStringParameters') else None
+          handlers = {
+            'GET': get_all_todos if not id else lambda: get_todo_by_id(id),
+            'POST': lambda: create_todo(body),
+            'PUT': lambda: update_todo(id, body) if id else unsupported_method,
+            'DELETE': lambda: delete_todo(id) if id else unsupported_method
+          }
+          return handlers.get(http_method, unsupported_method)()
+        def unsupported_method():
+          return {
+            'statusCode': 400,
+            'body': json.dumps({'message': 'Unsupported HTTP method or missing ID'})
+          }
+        def get_all_todos():
+          try:
+            response = table.scan()
+            todos = response.get("Items", [])
+            return create_response(200, todos)
+          except Exception as e:
+            return create_error_response(500, 'Error retrieving todos', e)
+        def get_todo_by_id(id):
+          try:
+            response = table.get_item(Key={'id': id})
+            todo = response.get('Item')
+            if not todo:
+              return create_response(404, {'message': 'Todo not found'})
+            return create_response(200, todo)
+          except Exception as e:
+              return create_error_response(500, 'Error retrieving todo', e)
+        def update_todo(id, body):
+          try:
+            response = table.get_item(Key={'id': id})
+            todo = response.get('Item')
+            if not todo:
+              return create_response(404, {'message': 'Todo not found'})
+            updated_todo = {**todo, **body}
+            table.put_item(Item=updated_todo)
+            return create_response(200, {'message': 'Todo updated', 'id': id})
+          except Exception as e:
+            return create_error_response(500, 'Error updating todo', e)
+        def create_todo(body):
+            try:
+                todo_id = str(uuid.uuid4())
+                body['id'] = todo_id
+                table.put_item(Item=body)
+                return create_response(201, {'message': 'Todo created', 'id': todo_id})
+            except Exception as e:
+                return create_error_response(500, 'Error creating todo', e)
+        def delete_todo(id):
+            try:
+                response = table.get_item(Key={'id': id})
+                todo = response.get('Item')
+                if not todo:
+                    return create_response(404, {'message': 'Todo not found'})
+                table.delete_item(Key={'id': id})
+                return create_response(200, {'message': 'Todo deleted'})
+            except Exception as e:
+                return create_error_response(500, 'Error deleting todo', e)
+        def create_response(status_code, body):
+            return {
+                'statusCode': status_code,
+                'body': json.dumps(body)
+            }
+        def create_error_response(status_code, message, error):
+            return {
+                'statusCode': status_code,
+                'body': json.dumps({'message': message, 'error': str(error)})
+            }
+
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TodosTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TodosTable
+      Events:
+        HttpApiEvent:
+          Type: HttpApi
+          Properties:
+            Path: /api/todo
+            Method: ANY
+            ApiId: !Ref HttpApi
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: Prod
+      DefaultRouteSettings:
+        DetailedMetricsEnabled: true
+        ThrottlingBurstLimit: 200
+      FailOnWarnings: true
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Sub ${Username}.cloudacademy.spikeseed.ninja
+        Origins:
+          - DomainName: !Sub ${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+            Id: HttpApiOrigin
+            OriginPath: /Prod
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+        Enabled: true
+        DefaultCacheBehavior:
+          TargetOriginId: HttpApiOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - DELETE
+            - PATCH
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          ForwardedValues:
+            QueryString: true
+            Headers:
+              - Authorization
+            Cookies:
+              Forward: none
+          DefaultTTL: 0
+          MaxTTL: 0
+          MinTTL: 0
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CloudFrontCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: none
+
+  CloudFrontAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref SsmPublicHostedZoneIdKey
+      Name: !Sub ${Username}.cloudacademy.spikeseed.ninja
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        EvaluateTargetHealth: true

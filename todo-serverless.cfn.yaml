@@ -1,0 +1,142 @@
+Parameters:
+
+  AccountName:
+    Type: String
+    Default: cloudacademy
+  AccountCode:
+    Type: String
+    Default: a
+  RegionCode:
+    Type: String
+    Default: ew1
+  Environment:
+    Type: String
+    Default: training
+  Project:
+    Type: String
+    Default: cloudacademy
+  Application:
+    Type: String
+    Default: api-lambda-todo
+  SsmPublicHostedZoneIdKey:
+    Type: AWS::SSM::Parameter::Value<AWS::Route53::HostedZone::Id>
+    Default: /cloudacademy/cfn/route53/hostedzone/public/id
+  SsmVpcIdKey:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::VPC::Id>
+    Default: /cloudacademy/cfn/app/vpc/id
+  SsmSubnetsKey:
+    Type: AWS::SSM::Parameter::Value<List<AWS::EC2::Subnet::Id>>
+    Default: /cloudacademy/cfn/app/vpc/subnet/public/ids
+  Username:
+    Type: String
+    Default: foloruda
+
+Resources:
+
+  TodoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Project}-${Application}-${Username}-todotable
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      Tags:
+        - Key: Name
+          Value: !Sub ${AccountCode}-${RegionCode}-${Project}-${Application}-${Username}
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Username}-lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${Username}-lambda-execution-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource: !GetAtt TodoTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetObject
+                Resource: "*"
+
+  TodoApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Project}-${Application}-${Username}-todo-api
+      Handler: lambda_function/todo_api.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: a-ew1-echo-s3
+        S3Key: 
+        # ZipFile: |
+          # Place your Python code here or use S3 with Code property
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TodoTable
+      MemorySize: 128
+      Timeout: 30
+
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${Project}-${Application}-${Username}-apigateway
+
+  ApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: api
+      RestApiId: !Ref ApiGateway
+
+  ApiGatewayTodoResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref ApiGatewayResource
+      PathPart: todo
+
+  ApiGatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: ANY
+      ResourceId: !Ref ApiGatewayTodoResource
+      RestApiId: !Ref ApiGateway
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: 
+          Fn::Sub: 
+            - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+            - LambdaArn: !GetAtt TodoApiFunction.Arn
+  
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TodoApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*
+
+Outputs:
+  ApiGatewayEndpoint:
+    Description: "Endpoint for the API"
+    Value: !Sub
+      https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/api/todo

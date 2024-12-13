@@ -1,0 +1,27 @@
+---
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    aws_region: "eu-west-1"
+    profile: "cloudacademy"
+  tasks:
+    - name: Deploy CloudFormation stack for API Gateway with Lambda integration using SAM template
+      amazon.aws.cloudformation:
+        stack_name: "a-ew1-cloudacademy-lambda-foloruda"
+        state: "present"
+        region: "{{aws_region}}"
+        profile: "{{profile}}"
+        template: "sam-lambda.cfn.yaml"
+        tags:
+          Name: "foloruda-python-api-handson"
+          Project: "{{profile}}"
+        capabilities:
+          - "CAPABILITY_IAM"
+          - "CAPABILITY_NAMED_IAM"
+          - "CAPABILITY_AUTO_EXPAND"
+        template_parameters:
+          CloudFrontCertificateArn: "arn:aws:acm:us-east-1:239795269148:certificate/72861fc3-991a-436e-829a-15fb5647666f"
+          Username: foloruda
+          Runtime: python3.12
+          MemorySize: 256

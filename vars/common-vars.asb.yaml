@@ -1,0 +1,12 @@
+---
+AccountName: cloudacademy
+AccountCode: a
+RegionCode: ew1
+Region: eu-west-1
+Environment: training
+Project: cloudacademy
+Application: api-lambda-todo
+SsmPublicHostedZoneIdKey: /cloudacademy/cfn/route53/hostedzone/public/id
+Username: foloruda
+stack_name: foloruda-serverless-arc-lambda-stack
+template_file: foloruda-python-lambda.cfn.yaml
